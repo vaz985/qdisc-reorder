@@ -48,7 +48,6 @@ setup_interface "veth12" "10.0.0.1/24" "ns1"
 setup_interface "veth21" "10.0.0.2/24" "ns2"
 
 ip netns exec ns0 ip route add default via 10.255.0.1 dev veth01 initcwnd 10
-ip netns exec ns1 ip route add 10.0.0.2 via 10.0.0.1 dev veth12
 ip netns exec ns2 ip route add default via 10.0.0.1 dev veth21 initcwnd 10
 
 ip netns exec ns1 ip link set veth12 txqueuelen 1000
