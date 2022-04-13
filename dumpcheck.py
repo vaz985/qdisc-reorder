@@ -171,7 +171,7 @@ class ConnectionReader:
         # tcpdump does not read gzip:
         # https://github.com/the-tcpdump-group/tcpdump/issues/254
         cmds = [
-            f"zcat {dump}",
+            f"zcat {dump}" if str(dump).endswith(".gz") else f"cat {dump}",
             f"tcpdump --absolute-tcp-sequence-numbers -n -r - tcp and src net {server_network}",
             'sort --stable --field-separator=" " -k3,5',
         ]
