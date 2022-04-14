@@ -1,52 +1,50 @@
 # qdisc-reorder
 
-We found that HTB causes packet reordering when packets are forwarded over veth devices connecting different network namespaces. We create three namespaces connected by two veths:
+We found packet reordering when TCP packets are transferred over veth devices
+connecting different network namespaces. We create two namespaces connected by a
+pair of veths and disabled tso/gso to remove offloading.
 
-```{text}
-ns0          ns1          ns2
-veth01 <---> veth10
-             veth12 <---> veth21
+```
+Dependencies:
+apt install ethtool lighttpd tcpdump
 ```
 
-We set up 4 TCP connections between 4 different server-client pairs. Servers run in ns0, clients run in ns2, and the bulk of the bytes traverse veth01 → veth10 → veth12 → veth2. We configure HTB to shape traffic leaving veth12. We configure the parent class with 1000mb rate and configure one leaf class per server-client pair with 1000mbit rate (dedicated) with 1000-packet buffers:
+To reproduce our environment, set up a lighttpd web server at ns0 with fixed
+size files, fetch files at ns1 using wget and capture packets on both veth’s
+using tcpdump. Running several transfers of 2048KiB we were able to detect
+transfers with reordered packets, and in some cases those reordered packets
+triggered retransmissions. The example below shows a sample case of the state of
+the packets before and after going through the veth pair (we made sure those are
+the same packets, not retransmitted).
 
-```{bash}
-ip netns exec ns1 ip link set veth12 txqueuelen 1000
-ip netns exec ns1 tc qdisc add dev veth12 root handle 1: htb default 2
-ip netns exec ns1 tc class add dev veth12 parent 1: classid 1:1 htb rate 1000Mbit
-ip netns exec ns1 tc class add dev veth12 parent 1:1 classid 1:2 htb rate 1000Mbit ceil 1000Mbit
-for i in 0 1 2 3 ; do
-    classid=1:$((4 + i))
-    port=$((6000 + i))
-    ip netns exec ns1 tc class add dev veth12 parent 1:1 \
-        classid "$classid" htb rate 1000Mbit ceil 1000Mbit
-    ip netns exec ns1 tc filter add dev veth12 parent 1:0 \
-        protocol ip u32 match ip sport "$port" 0xffff flowid "$classid"
-done
+```
+veth0 tcpdump                  veth1 tcpdump
+Time=23.284372 Seq=900169      Time=23.284487 Seq=909481
+Time=23.284374 Seq=901617      Time=23.284488 Seq=900169
+Time=23.284377 Seq=903065      Time=23.284490 Seq=910929
+Time=23.284379 Seq=905961      Time=23.284491 Seq=901617
+Time=23.284381 Seq=907409      Time=23.284492 Seq=912377
+Time=23.284383 Seq=908857      Time=23.284493 Seq=903065
+Time=23.284384 Seq=909481      Time=23.284495 Seq=913825
+Time=23.284428 Seq=910929      Time=23.284495 Seq=905961
+Time=23.284430 Seq=912377      Time=23.284496 Seq=916721
+Time=23.284431 Seq=913825      Time=23.284498 Seq=905961
 ```
 
-To showcase the reordering, we limit iperf’s transfer rate to 20mbit to avoid packet drops at veth12. However, looking at iperf’s output we can see that a significant number of packets were retransmitted, and looking at tcpdump we can see that packets are reordered. Below is one example from one connection showing packets arriving out-of-order at veth21 (captures from veth01 are sorted by time and sequence number, captures from veth21 are sorted by time but sequence numbers are out of order).
+We tried different qdisc to understand the scope of the problem and were able to
+reproduce on tc-fq, tc-pfifo_fast and netem (we didn't test others, but expect
+the problem to persist). Using netem we were able to reduce and even suppress
+reordering by reducing the rate, because of that we speculate the burst of
+packets to be what causes the problem. We also tested this under different
+machines and using kernel 4.20, 5.15 and 5.16. Is this behavior expected?
 
-```{text}
-veth01 tcpdump                 veth21 tcpdump
-Time=2.412032 Seq=3014657      Time=2.412144 Seq=3014657
-Time=2.412031 Seq=3016105      Time=2.412158 Seq=3017553
-Time=2.412030 Seq=3017553      Time=2.412162 Seq=3016105
-Time=2.412029 Seq=3019001      Time=2.412176 Seq=3024793
-Time=2.412028 Seq=3020449      Time=2.412180 Seq=3020449
-Time=2.412027 Seq=3021897      Time=2.412184 Seq=3027689
-Time=2.412026 Seq=3023345      Time=2.412203 Seq=3023345
-```
-
-The qdist_reorder_test.sh script in the Git repo below can be used to
-run the tests, and dumpcheck.py can be used to get statistics on packet
-reordering from the two packet capture dumps. The dumpcheck.py script
-does not need root permissions and can be run with:
+The qdist_reorder_test.sh script in the Git repo below can be used to run the
+tests, and dumpcheck.py can be used to get statistics on packet reordering from
+the two packet capture dumps. The dumpcheck.py script does not need root
+permissions and can be run with:
 
 ```{bash}
 ./dumpcheck.py --server-dump test-output/tcpdump_out_ns0.dump.gz \
         --client-dump test-output/tcpdump_out_ns2.dump.gz \
         --output summary.txt
 ```
-
-We were able to reproduce this problem on vanilla kernel version 4.19.208 and 5.15.
